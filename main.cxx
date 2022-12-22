@@ -8,8 +8,10 @@
  *  $ mkdir-p build && cd build && cmake -GNinja
  *  $ ninja
  * Run:
+ *  Launch a server on port 1234
  *  $ ./main -s 1234 &
- *  $ ./main -c localhost 1234
+ *  Connect to a server and execute 100 remote commands.
+ *  $ ./main -c localhost 1234 -n100 
  *
  */
 // clang-format on
@@ -191,6 +193,7 @@ int main(int argc, char *argv[]) {
 
   std::string addr;
   int port;
+  int numMessages = 20;
 
   for (int i = 1; i < argc; ++i) {
     const char *arg = argv[i];
@@ -210,6 +213,10 @@ int main(int argc, char *argv[]) {
     case 'v': {
       vtkLogger::SetStderrVerbosity(
           vtkLogger::ConvertToVerbosity(std::atoi(&arg[2])));
+      break;
+    }
+    case 'n': {
+      numMessages = std::atoi(&arg[2]);
       break;
     }
     default:
@@ -315,14 +322,15 @@ int main(int argc, char *argv[]) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  while (++counter < 20) {
-    if (clientSocket->GetConnectingSide()) {
+  if (clientSocket->GetConnectingSide()) {
+    while (counter < numMessages) {
       // pick a random message collection from the pool.
       auto poolIdx = poolIdxRnd(rng);
       auto msgIdx = msgIdxRnds[poolIdx](rng);
       // message the service
       auto msg = messagePool[poolIdx][msgIdx];
       comm.sendSbjct.get_subscriber().on_next(msg);
+      ++counter;
     }
   }
   // no longer sending messages.
