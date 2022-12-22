@@ -51,6 +51,7 @@ std::vector<std::unique_ptr<std::thread>> services;
 static vtkSmartPointer<vtkClientSocket> clientSocket;
 static vtkSmartPointer<vtkServerSocket> serverSocket;
 
+// remove the service guid and return only the message.
 std::string getMessage(const std::string &packet) {
   auto colonSep = packet.find(":");
   return packet.substr(colonSep + 1, packet.length() - colonSep);
@@ -60,7 +61,7 @@ std::string getMessage(const std::string &packet) {
 void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
   auto runLoop = std::make_shared<rxcpp::schedulers::run_loop>();
   vtkLogger::SetThreadName("comm.send");
-  uint64_t sendCounter = 1;
+  unsigned long sendCounter = 1;
 
   comm.sendSbjct
       .get_observable()
@@ -73,7 +74,7 @@ void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
       .observe_on(rxcpp::observe_on_run_loop(*runLoop))
       .subscribe([&socket, &sendCounter](std::string msg) {
         int status = socket->Send(msg.data(), msg.size());
-        vtkLogF(TRACE, "=> [%ld] send \'%s\'", sendCounter, msg.c_str());
+        vtkLogF(TRACE, "=> [%lu] send \'%s\'", sendCounter, msg.c_str());
         sendCounter++;
       });
 
@@ -92,7 +93,7 @@ void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
 // recv messages using a vtkClientSocket
 void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
   vtkLogger::SetThreadName("comm.recv");
-  uint64_t recvCounter = 1;
+  unsigned long recvCounter = 1;
 
   while (!exitComm.load() && socket->GetConnected()) {
     char buf[64] = {};
@@ -109,14 +110,14 @@ void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
       vtkLog(ERROR, << "=> Failed to select socket");
     } else if (status == 1) {
       // success
-      int recvd = socket->Receive(buf, sizeof(buf) * sizeof(char), 0);
+      int recvd = socket->Receive(buf, sizeof(buf), 0);
       if (recvd == 0) {
         // other end of socket closed.
         vtkLog(TRACE, << "=> Recvd 0 bytes.");
         break;
       }
       std::string msg(buf, recvd);
-      vtkLogF(TRACE, "=> [%ld] recv \'%s\'", recvCounter, msg.c_str());
+      vtkLogF(TRACE, "=> [%lu] recv \'%s\'", recvCounter, msg.c_str());
       recvCounter++;
       comm.recvSbjct.get_subscriber().on_next(msg);
     }
@@ -239,7 +240,7 @@ int main(int argc, char *argv[]) {
     std::stringstream msgStream;
     // what if message is bigger than 1024?
     char buf[1024] = {};
-    int recvd = clientSocket->Receive(buf, sizeof(buf) * sizeof(char), 0);
+    int recvd = clientSocket->Receive(buf, sizeof(buf), 0);
     std::string msg(buf, recvd);
     vtkLog(INFO, << "=>Receiving service registry..");
     while (!msg.empty()) {
@@ -260,6 +261,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // launch sender and receiver threads.
   exitComm.store(false);
   std::thread sender(&sendLoop, clientSocket);
   std::thread receiver(&recvLoop, clientSocket);
