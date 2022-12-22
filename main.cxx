@@ -25,7 +25,7 @@
 #include <thread>
 #include <utility>
 
-#include <vtkLogger.h>       // for vtkLog(..)
+#include <vtkLogger.h>       // for vtkLog()
 #include <vtkServerSocket.h> // for server
 #include <vtkClientSocket.h> // for client
 #include <vtkSmartPointer.h> // for memory management of VTK objects
@@ -73,14 +73,18 @@ void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
       // switch to send thread and transmit from there.
       .observe_on(rxcpp::observe_on_run_loop(*runLoop))
       .subscribe([&socket, &sendCounter](std::string msg) {
-        int status = socket->Send(msg.data(), msg.size());
+        int size[1] = {static_cast<int>(msg.size())};
+        // send the size of message first, then the message itself.
+        int status = socket->Send(size, sizeof(size)) &&
+                     socket->Send(msg.data(), msg.size());
+        vtkLogIfF(ERROR, status != 1, "=> Send failed!");
         vtkLogF(TRACE, "=> [%lu] send \'%s\'", sendCounter, msg.c_str());
         sendCounter++;
       });
 
   //   runLoop->set_notify_earlier_wakeup([&](auto when) {
   //     auto duration = std::chrono::duration<double>(when - runLoop->now());
-  //     std::this_thread::sleep_for(duration);
+  //     TODO: figure this out.
   //   });
   while (!exitComm.load() && socket->GetConnected()) {
     while (!runLoop->empty() && runLoop->peek().when < runLoop->now()) {
@@ -94,14 +98,14 @@ void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
 void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
   vtkLogger::SetThreadName("comm.recv");
   unsigned long recvCounter = 1;
+  std::vector<char> buf(128, 0);
 
   while (!exitComm.load() && socket->GetConnected()) {
-    char buf[64] = {};
     const int socks[1] = {socket->GetSocketDescriptor()};
     int selected = -1;
     // timeout of 0 would block this thread. let's timeout after 5ms to keep it
     // running.
-    int status = vtkSocket::SelectSockets(socks, 1, 5, &selected);
+    int status = vtkSocket::SelectSockets(socks, 1, 1, &selected);
     if (status == 0) {
       // timeout
       continue;
@@ -110,13 +114,21 @@ void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
       vtkLog(ERROR, << "=> Failed to select socket");
     } else if (status == 1) {
       // success
-      int recvd = socket->Receive(buf, sizeof(buf), 0);
+      int size[1] = {};
+      int recvd = socket->Receive(size, sizeof(size), 1);
       if (recvd == 0) {
         // other end of socket closed.
         vtkLog(TRACE, << "=> Recvd 0 bytes.");
         break;
       }
-      std::string msg(buf, recvd);
+      buf.resize(size[0]);
+      recvd = socket->Receive(buf.data(), size[0]);
+      if (recvd == 0) {
+        // other end of socket closed.
+        vtkLog(TRACE, << "=> Recvd 0 bytes.");
+        break;
+      }
+      std::string msg(buf.data(), recvd);
       vtkLogF(TRACE, "=> [%lu] recv \'%s\'", recvCounter, msg.c_str());
       recvCounter++;
       comm.recvSbjct.get_subscriber().on_next(msg);
@@ -170,7 +182,7 @@ void createService(const std::string serviceName) {
   serviceRegistry.emplace(serviceItem);
   services.emplace_back(std::make_unique<std::thread>(
       &serviceEmulator, serviceItem.first, serviceItem.second));
-  vtkLogF(INFO, "Registered %s:%zu", serviceItem.first.c_str(),
+  vtkLogF(INFO, "=> Registered %s:%zu", serviceItem.first.c_str(),
           serviceItem.second);
 }
 
@@ -230,6 +242,7 @@ int main(int argc, char *argv[]) {
     createService("render");
     createService("io");
     std::stringstream msg;
+    vtkLog(INFO, << "=> Advertise service registry");
     for (const auto &serviceItem : serviceRegistry) {
       msg << serviceItem.first << ":" << serviceItem.second << '|';
     }
@@ -242,7 +255,7 @@ int main(int argc, char *argv[]) {
     char buf[1024] = {};
     int recvd = clientSocket->Receive(buf, sizeof(buf), 0);
     std::string msg(buf, recvd);
-    vtkLog(INFO, << "=>Receiving service registry..");
+    vtkLog(INFO, << "=> Receiving service registry");
     while (!msg.empty()) {
       auto itemSep = msg.find_first_of('|');
       auto colonSep = msg.find_first_of(':');
@@ -261,7 +274,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // launch sender and receiver threads.
+  // launch sender and receiver threads. communicator gets to work.
   exitComm.store(false);
   std::thread sender(&sendLoop, clientSocket);
   std::thread receiver(&recvLoop, clientSocket);
@@ -296,8 +309,13 @@ int main(int argc, char *argv[]) {
   msgIdxRnds.emplace_back(0, renderMsgs.size() - 1);
   msgIdxRnds.emplace_back(0, ioMsgs.size() - 1);
 
+  // before we begin sending messages, wait for communicator to initialize.
+  while (!comm.sendSbjct.has_observers()) {
+    vtkLog(TRACE, "=> wait for comm initialize");
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
   while (++counter < 20) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     if (clientSocket->GetConnectingSide()) {
       // pick a random message collection from the pool.
       auto poolIdx = poolIdxRnd(rng);
@@ -307,18 +325,20 @@ int main(int argc, char *argv[]) {
       comm.sendSbjct.get_subscriber().on_next(msg);
     }
   }
-  std::this_thread::sleep_for(std::chrono::seconds(1));
   // no longer sending messages.
   comm.sendSbjct.get_subscriber().on_completed();
 
+  // server will run to shutdown services, so let's wait a bit.
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
   // terminate services. (order SHOULD not matter)
-  vtkLog(INFO, "=> Shutdown services..");
+  vtkLog(INFO, "=> Shutdown services");
   exitServices.store(true);
   for (auto &service : services) {
     service->join();
   }
   // terminate send, recv loops. (order SHOULD not matter)
-  vtkLog(INFO, "=> Shutdown comm..");
+  vtkLog(INFO, "=> Shutdown comm");
   exitComm.store(true);
   sender.join();
   receiver.join();
@@ -326,14 +346,14 @@ int main(int argc, char *argv[]) {
   // on server side, wait for client to exit.
   if (!clientSocket->GetConnectingSide()) {
     while (clientSocket->GetConnected()) {
-      vtkLogF(INFO, "Wait for client to disconnect..");
+      vtkLogF(INFO, "Wait for client to disconnect");
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       clientSocket->CloseSocket();
     }
-    vtkLog(INFO, "=> Shutdown server..");
+    vtkLog(INFO, "=> Shutdown server");
     serverSocket->CloseSocket();
   } else {
-    vtkLog(INFO, "=> Shutdown client..");
+    vtkLog(INFO, "=> Shutdown client");
     clientSocket->CloseSocket();
   }
 
