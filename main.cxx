@@ -34,10 +34,11 @@
 #define WSA_VERSION MAKEWORD(1, 1)
 #endif
 
-#include <vtkLogger.h>       // for vtkLog()
-#include <vtkServerSocket.h> // for server
-#include <vtkClientSocket.h> // for client
-#include <vtkSmartPointer.h> // for memory management of VTK objects
+#include <vtkLogger.h>                  // for vtkLog()
+#include <vtksys/SystemInformation.hxx> // for load
+#include <vtkServerSocket.h>            // for server
+#include <vtkClientSocket.h>            // for client
+#include <vtkSmartPointer.h>            // for memory management of VTK objects
 
 #include "rxcpp/rx-includes.hpp" // for rxcpp
 
@@ -378,6 +379,8 @@ int main(int argc, char *argv[]) {
     while (numMessages != numResponses) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+    vtksys::SystemInformation info;
+    vtkLogF(INFO, "Average load %f", info.GetLoadAverage());
   } else {
     std::signal(SIGINT, [](int) {
       vtkLog(INFO, "Caught SIGINT");
@@ -388,6 +391,8 @@ int main(int argc, char *argv[]) {
     // client disconnects or SIGINT.
     auto fut = exitServer.get_future();
     fut.wait();
+    vtksys::SystemInformation info;
+    vtkLogF(INFO, "Average load %f", info.GetLoadAverage());
   }
 
   // terminate services. (order SHOULD not matter)
