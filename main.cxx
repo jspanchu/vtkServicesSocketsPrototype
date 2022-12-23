@@ -20,6 +20,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <future>
 #include <sstream>
 #include <unordered_map>
 #include <memory>
@@ -144,7 +145,11 @@ void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
   comm.recvSbjct.get_subscriber().on_completed();
   vtkLogF(INFO, "exit");
   // server no longer needs to run.
-  exitServer.set_value(true);
+  try {
+    exitServer.set_value(true);
+  } catch (std::future_error &e) {
+    vtkLog(INFO, "Server interrupted");
+  }
 }
 
 // emulate a service.
@@ -370,7 +375,11 @@ int main(int argc, char *argv[]) {
   } else {
     std::signal(SIGINT, [](int) {
       vtkLog(INFO, "Caught SIGINT");
-      exitServer.set_value(true);
+      try {
+        exitServer.set_value(true);
+      } catch (std::future_error &e) {
+        vtkLog(INFO, "Client already disconnected");
+      }
     });
     // wait for exitServer to be signalled.
     // it can be signalled from recvLoop when
