@@ -84,7 +84,7 @@ void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
         int size[1] = {static_cast<int>(msg.size())};
         // send the size of message first, then the message itself.
         int status = socket->Send(size, sizeof(size)) &&
-                     socket->Send(msg.data(), msg.size());
+                     socket->Send(msg.data(), size[0]);
         vtkLogIfF(ERROR, status != 1, "=> Send failed!");
         vtkLogF(TRACE, "=> [%lu] send \'%s\'", sendCounter, msg.c_str());
         sendCounter++;
@@ -198,7 +198,7 @@ void createService(const std::string serviceName) {
 int main(int argc, char *argv[]) {
 
   std::string addr;
-  int port;
+  int port = 1234;
   int numMessages = 20;
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
@@ -267,7 +267,7 @@ int main(int argc, char *argv[]) {
     for (const auto &serviceItem : serviceRegistry) {
       msg << serviceItem.first << ":" << serviceItem.second << '|';
     }
-    clientSocket->Send(msg.str().data(), msg.str().size());
+    clientSocket->Send(msg.str().data(), static_cast<int>(msg.str().size()));
   } else {
     // client can have it's own services.
     // however, it can get the advertised services from the server.
