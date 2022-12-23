@@ -48,6 +48,7 @@
 struct Communicator {
   // services can use the send subject to enqueue outgoing messages.
   rxcpp::subjects::subject<std::string> sendSbjct;
+  unsigned long sendCounter = 1;
   // use the recvSubject to act upon new incoming messages.
   rxcpp::subjects::subject<std::string> recvSbjct;
 };
@@ -78,10 +79,6 @@ std::string getMessage(const std::string &packet) {
 
 // send messages using a vtkClientSocket.
 void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
-  auto runLoop = std::make_shared<rxcpp::schedulers::run_loop>();
-  vtkLogger::SetThreadName("comm.send");
-  unsigned long sendCounter = 1;
-
   comm.sendSbjct
       .get_observable()
       // enqueue on main thread.
@@ -90,27 +87,20 @@ void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
         vtkLogF(INFO, "=> Enqueue msg: %s", getMessage(msg).c_str());
       })
       // switch to send thread and transmit from there.
-      .observe_on(rxcpp::observe_on_run_loop(*runLoop))
-      .subscribe([&socket, &sendCounter](std::string msg) {
-        int size[1] = {static_cast<int>(msg.size())};
-        // send the size of message first, then the message itself.
-        int status = socket->Send(size, sizeof(size)) &&
-                     socket->Send(msg.data(), size[0]);
-        vtkLogIfF(ERROR, status != 1, "=> Send failed!");
-        vtkLogF(TRACE, "=> [%lu] send \'%s\'", sendCounter, msg.c_str());
-        sendCounter++;
-      });
-
-  //   runLoop->set_notify_earlier_wakeup([&](auto when) {
-  //     auto duration = std::chrono::duration<double>(when - runLoop->now());
-  //     TODO: figure this out.
-  //   });
-  while (!exitComm.load() && socket->GetConnected()) {
-    while (!runLoop->empty() && runLoop->peek().when < runLoop->now()) {
-      runLoop->dispatch();
-    }
-  }
-  vtkLogF(INFO, "exit");
+      .observe_on(rxcpp::observe_on_new_thread())
+      .subscribe(
+          [socket](std::string msg) {
+            vtkLogger::SetThreadName("comm.send");
+            int size[1] = {static_cast<int>(msg.size())};
+            // send the size of message first, then the message itself.
+            int status = socket->Send(size, sizeof(size)) &&
+                         socket->Send(msg.data(), size[0]);
+            vtkLogIfF(ERROR, status != 1, "=> Send failed!");
+            vtkLogF(TRACE, "=> [%lu] send \'%s\'", comm.sendCounter,
+                    msg.c_str());
+            comm.sendCounter++;
+          },
+          []() { vtkLog(INFO, "Send complete") });
 }
 
 // recv messages using a vtkClientSocket
@@ -313,7 +303,7 @@ int main(int argc, char *argv[]) {
 
   // launch sender and receiver threads. communicator gets to work.
   exitComm.store(false);
-  std::thread sender(&sendLoop, clientSocket);
+  sendLoop(clientSocket);
   std::thread receiver(&recvLoop, clientSocket);
 
   // fake some messages on three services.
@@ -363,7 +353,7 @@ int main(int argc, char *argv[]) {
         // so handle responses on a new thread.
         .observe_on(rxcpp::observe_on_new_thread())
         .subscribe([&numResponses](std::string msg) {
-          vtkLogF(INFO, "response: %s", msg.c_str());
+          vtkLogF(INFO, "reply: %s", msg.c_str());
           numResponses++;
         });
     while (counter < numMessages) {
@@ -404,7 +394,6 @@ int main(int argc, char *argv[]) {
   // terminate send, recv loops. (order SHOULD not matter)
   vtkLog(INFO, "=> Shutdown comm");
   exitComm.store(true);
-  sender.join();
   receiver.join();
 
   // on server side, wait for client to exit.
