@@ -34,8 +34,14 @@
 #define VTK_WINDOWS_FULL
 #include "vtkWindows.h" // has winsock2 headers
 #define WSA_VERSION MAKEWORD(1, 1)
+// these defines are copied from vtkSocket.cxx
+#define vtkErrnoMacro (WSAGetLastError())
+#define vtkStrerrorMacro(_num) (wsaStrerror(_num))
 #else
 #include <sys/socket.h> // required for shutdown
+// these defines are copied from vtkSocket.cxx
+#define vtkErrnoMacro (errno)
+#define vtkStrerrorMacro(_num) (strerror(_num))
 #endif
 
 #include <vtkLogger.h>                  // for vtkLog()
@@ -104,9 +110,12 @@ void sendLoop(vtkSmartPointer<vtkClientSocket> socket) {
             vtkLogger::SetThreadName("comm.send");
             int size[1] = {static_cast<int>(msg.size())};
             // send the size of message first, then the message itself.
-            int status = socket->Send(size, sizeof(size)) &&
-                         socket->Send(msg.data(), size[0]);
-            vtkLogIfF(ERROR, status != 1, "=> Send failed!");
+            int status = socket->Send(size, sizeof(size));
+            vtkLogIfF(ERROR, status != 1, "=> Send size failed! %s",
+                      vtkStrerrorMacro(vtkErrnoMacro));
+            status = socket->Send(msg.data(), size[0]);
+            vtkLogIfF(ERROR, status != 1, "=> Send data failed! %s",
+                      vtkStrerrorMacro(vtkErrnoMacro));
             vtkLogF(TRACE, "=> [%lu] send \'%s\'", comm.sendCounter,
                     msg.c_str());
             comm.sendCounter++;
@@ -128,12 +137,18 @@ void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
       // socket closed. (this or other end)
       vtkLog(TRACE, << "=> Recvd 0 bytes.");
       break;
+    } else if (recvd == -1) {
+      vtkLog(ERROR, << vtkStrerrorMacro(vtkErrnoMacro));
+      break;
     }
     buf.resize(size[0]);
     recvd = socket->Receive(buf.data(), size[0]);
     if (recvd == 0) {
       // socket closed. (this or other end)
       vtkLog(TRACE, << "=> Recvd 0 bytes.");
+      break;
+    } else if (recvd == -1) {
+      vtkLog(ERROR, << vtkStrerrorMacro(vtkErrnoMacro));
       break;
     }
     std::string msg(buf.data(), recvd);
@@ -404,6 +419,9 @@ int main(int argc, char *argv[]) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       // shutting down the socket will unblock the recv thread
       shutdownSocket(clientSocket);
+      // join receiver now, otherwise recv may raise bad file descriptor.
+      vtkLog(INFO, "=> Shutdown receiver");
+      receiver.join();
       clientSocket->CloseSocket();
     }
     vtkLog(INFO, "=> Shutdown server");
@@ -411,10 +429,11 @@ int main(int argc, char *argv[]) {
   } else {
     vtkLog(INFO, "=> Shutdown client");
     shutdownSocket(clientSocket);
+    // join receiver now, otherwise recv may raise bad file descriptor.
+    vtkLog(INFO, "=> Shutdown receiver");
+    receiver.join();
     clientSocket->CloseSocket();
   }
-  vtkLog(INFO, "=> Shutdown receiver");
-  receiver.join();
 
   return 0;
 }
