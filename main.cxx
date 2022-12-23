@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <sstream>
 #include <unordered_map>
@@ -52,14 +53,23 @@ struct Communicator {
 
 // global communicator instance used by all services and the send, recv loops.
 static Communicator comm;
+// used to exit communicator loop
 static std::atomic<bool> exitComm;
+// used to exit service loop
 static std::atomic<bool> exitServices;
+// used to send exit signal to the server.
+static std::promise<bool> exitServer;
+// <serviceName, serviceGid>
 static std::map<std::string, std::size_t> serviceRegistry;
+// service threads
 std::vector<std::unique_ptr<std::thread>> services;
+// on client: socket used to communicate with server, on server: socket used to
+// communicate with client
 static vtkSmartPointer<vtkClientSocket> clientSocket;
+// on client: does not exist, on server: used to accept client connections.
 static vtkSmartPointer<vtkServerSocket> serverSocket;
 
-// remove the service guid and return only the message.
+// remove the service gid and return only the message.
 std::string getMessage(const std::string &packet) {
   auto colonSep = packet.find(":");
   return packet.substr(colonSep + 1, packet.length() - colonSep);
@@ -145,6 +155,8 @@ void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
   // no longer receiving messages.
   comm.recvSbjct.get_subscriber().on_completed();
   vtkLogF(INFO, "exit");
+  // server no longer needs to run.
+  exitServer.set_value(true);
 }
 
 // emulate a service.
@@ -161,19 +173,23 @@ void serviceEmulator(const std::string serviceName,
       .filter([&serviceId](std::string msg) {
         return (msg.find(std::to_string(serviceId)) != std::string::npos);
       })
-      // remove that service guid.
+      // remove that service gid.
       .map([](std::string msg) {
         auto colonSep = msg.find(":");
         return msg.substr(colonSep + 1, msg.length() - colonSep);
       })
-      // log message without guid.
+      // log message without gid.
       .tap([](std::string msg) {
         vtkLogF(TRACE, "=> Enqueue msg: %s", msg.c_str());
       })
       // switch to service thread.
       .observe_on(rxcpp::observe_on_run_loop(*runLoop))
       // service can now act accordingly. here, we log the message.
-      .subscribe([](auto msg) { vtkLogF(INFO, "%s", msg.c_str()); });
+      .subscribe([](auto msg) {
+        vtkLogF(INFO, "%s", msg.c_str());
+        // send a reply.
+        comm.sendSbjct.get_subscriber().on_next(std::string("response-") + msg);
+      });
   while (!exitServices.load()) {
     while (!runLoop->empty() && runLoop->peek().when < runLoop->now()) {
       runLoop->dispatch();
@@ -184,9 +200,9 @@ void serviceEmulator(const std::string serviceName,
 
 // called from server (client can also call it)
 void createService(const std::string serviceName) {
-  const auto guid = std::hash<std::string>{}(serviceName);
+  const auto gid = std::hash<std::string>{}(serviceName);
   const auto serviceItem =
-      std::make_pair(std::string("services.") + serviceName, guid);
+      std::make_pair(std::string("services.") + serviceName, gid);
   serviceRegistry.emplace(serviceItem);
   services.emplace_back(std::make_unique<std::thread>(
       &serviceEmulator, serviceItem.first, serviceItem.second));
@@ -203,8 +219,7 @@ int main(int argc, char *argv[]) {
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
   WSAData wsaData;
-  if (WSAStartup(WSA_VERSION, &wsaData))
-  {
+  if (WSAStartup(WSA_VERSION, &wsaData)) {
     vtkLog(ERROR, "Could not initialize sockets !");
   }
 #endif
@@ -283,14 +298,14 @@ int main(int argc, char *argv[]) {
       if (itemSep != std::string::npos && colonSep != std::string::npos) {
         std::string serviceName = msg.substr(0, colonSep);
         msg = msg.replace(0, colonSep + 1, "");
-        std::string serviceGuid = msg.substr(0, itemSep - colonSep - 1);
+        std::string servicegid = msg.substr(0, itemSep - colonSep - 1);
         msg = msg.replace(0, itemSep - colonSep, "");
-        std::stringstream guidStream;
-        guidStream << serviceGuid;
-        std::size_t guid;
-        guidStream >> guid;
-        serviceRegistry.emplace(std::make_pair(serviceName, guid));
-        vtkLogF(INFO, "=> %s:%zu", serviceName.c_str(), guid);
+        std::stringstream gidStream;
+        gidStream << servicegid;
+        std::size_t gid = 0;
+        gidStream >> gid;
+        serviceRegistry.emplace(std::make_pair(serviceName, gid));
+        vtkLogF(INFO, "=> %s:%zu", serviceName.c_str(), gid);
       }
     }
   }
@@ -337,6 +352,19 @@ int main(int argc, char *argv[]) {
   }
 
   if (clientSocket->GetConnectingSide()) {
+    // client issues remote commands on the server.
+    // here, it can handle responses from remote services.
+    std::atomic<int> numResponses = 0;
+    comm.recvSbjct
+        .get_observable()
+        // ideally, we want to setup rxcpp notify on earlier wakeup.
+        // to handle responses on main thread. but that is more work.
+        // so handle responses on a new thread.
+        .observe_on(rxcpp::observe_on_new_thread())
+        .subscribe([&numResponses](std::string msg) {
+          vtkLogF(INFO, "response: %s", msg.c_str());
+          numResponses++;
+        });
     while (counter < numMessages) {
       // pick a random message collection from the pool.
       auto poolIdx = poolIdxRnd(rng);
@@ -346,12 +374,21 @@ int main(int argc, char *argv[]) {
       comm.sendSbjct.get_subscriber().on_next(msg);
       ++counter;
     }
+    // wait until responses are received.
+    while (numMessages != numResponses) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+  } else {
+    std::signal(SIGINT, [](int) {
+      vtkLog(INFO, "Caught SIGINT");
+      exitServer.set_value(true);
+    });
+    // wait for exitServer to be signalled.
+    // it can be signalled from recvLoop when
+    // client disconnects or SIGINT.
+    auto fut = exitServer.get_future();
+    fut.wait();
   }
-  // no longer sending messages.
-  comm.sendSbjct.get_subscriber().on_completed();
-
-  // server will run to shutdown services, so let's wait a bit.
-  std::this_thread::sleep_for(std::chrono::seconds(1));
 
   // terminate services. (order SHOULD not matter)
   vtkLog(INFO, "=> Shutdown services");
