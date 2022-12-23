@@ -339,16 +339,18 @@ int main(int argc, char *argv[]) {
     // client issues remote commands on the server.
     // here, it can handle responses from remote services.
     std::atomic<int> numResponses = 0;
-    comm.recvSbjct
-        .get_observable()
-        // ideally, we want to setup rxcpp notify on earlier wakeup.
-        // to handle responses on main thread. but that is more work.
-        // so handle responses on a new thread.
-        .observe_on(rxcpp::observe_on_new_thread())
-        .subscribe([&numResponses](std::string msg) {
-          vtkLogF(INFO, "reply: %s", msg.c_str());
-          numResponses++;
-        });
+    auto responseSubscription =
+        comm.recvSbjct
+            .get_observable()
+            // ideally, we want to setup rxcpp notify on earlier wakeup.
+            // to handle responses on main thread. but that is more work.
+            // so handle responses on a new thread.
+            .observe_on(rxcpp::observe_on_new_thread())
+            .subscribe([&numResponses](std::string msg) {
+              vtkLogger::SetThreadName("response");
+              vtkLogF(INFO, "reply: %s", msg.c_str());
+              numResponses++;
+            });
     while (counter < numMessages) {
       // pick a random message collection from the pool.
       auto poolIdx = poolIdxRnd(rng);
@@ -363,6 +365,7 @@ int main(int argc, char *argv[]) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     vtksys::SystemInformation info;
+    responseSubscription.unsubscribe();
     vtkLogF(INFO, "Average load %f", info.GetLoadAverage());
   } else {
     std::signal(SIGINT, [](int) {
