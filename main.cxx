@@ -160,7 +160,7 @@ void serviceEmulator(const std::string serviceName,
       // ignore zero-length messages
       .filter([](auto msg) { return (msg.length() != 0); })
       // route to correct destination
-      .filter([&serviceId](std::string msg) {
+      .filter([serviceId](std::string msg) {
         return (msg.find(std::to_string(serviceId)) != std::string::npos);
       })
       // remove that service gid.
@@ -173,19 +173,19 @@ void serviceEmulator(const std::string serviceName,
         vtkLogF(TRACE, "=> Enqueue msg: %s", msg.c_str());
       })
       // switch to service thread.
-      .observe_on(rxcpp::observe_on_run_loop(*runLoop))
+      .observe_on(rxcpp::observe_on_new_thread())
       // service can now act accordingly. here, we log the message.
-      .subscribe([](auto msg) {
-        vtkLogF(INFO, "%s", msg.c_str());
-        // send a reply.
-        comm.sendSbjct.get_subscriber().on_next(std::string("response-") + msg);
-      });
-  while (!exitServices.load()) {
-    while (!runLoop->empty() && runLoop->peek().when < runLoop->now()) {
-      runLoop->dispatch();
-    }
-  }
-  vtkLogF(INFO, "exit");
+      .subscribe(
+          // on_next
+          [serviceName](auto msg) {
+            vtkLogger::SetThreadName(serviceName);
+            vtkLogF(INFO, "%s", msg.c_str());
+            // send a reply.
+            std::string reply = std::string("response-") + msg;
+            comm.sendSbjct.get_subscriber().on_next(reply);
+          },
+          // on_completed
+          []() { vtkLogF(INFO, "exit"); });
 }
 
 // called from server (client can also call it)
@@ -262,7 +262,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  exitServices.store(false);
   if (!clientSocket->GetConnectingSide()) {
     createService("data");
     createService("render");
