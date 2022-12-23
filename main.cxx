@@ -59,14 +59,12 @@ struct Communicator {
 
 // global communicator instance used by all services and the send, recv loops.
 static Communicator comm;
-// used to exit service loop
-static std::atomic<bool> exitServices;
 // used to send exit signal to the server.
 static std::promise<bool> exitServer;
 // <serviceName, serviceGid>
 static std::map<std::string, std::size_t> serviceRegistry;
-// service threads
-std::vector<std::unique_ptr<std::thread>> services;
+// service subscriptions
+static std::vector<rxcpp::composite_subscription> subscriptions;
 // on client: socket used to communicate with server, on server: socket used to
 // communicate with client
 static vtkSmartPointer<vtkClientSocket> clientSocket;
@@ -150,12 +148,9 @@ void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
 }
 
 // emulate a service.
-void serviceEmulator(const std::string serviceName,
-                     const std::size_t serviceId) {
-  auto runLoop = std::make_shared<rxcpp::schedulers::run_loop>();
-  vtkLogger::SetThreadName(serviceName);
-
-  comm.recvSbjct
+rxcpp::composite_subscription serviceEmulator(const std::string serviceName,
+                                              const std::size_t serviceId) {
+  return comm.recvSbjct
       .get_observable()
       // ignore zero-length messages
       .filter([](auto msg) { return (msg.length() != 0); })
@@ -194,8 +189,9 @@ void createService(const std::string serviceName) {
   const auto serviceItem =
       std::make_pair(std::string("services.") + serviceName, gid);
   serviceRegistry.emplace(serviceItem);
-  services.emplace_back(std::make_unique<std::thread>(
-      &serviceEmulator, serviceItem.first, serviceItem.second));
+  // establishes role of service by setting up service subscription.
+  subscriptions.emplace_back(
+      serviceEmulator(serviceItem.first, serviceItem.second));
   vtkLogF(INFO, "=> Registered %s:%zu", serviceItem.first.c_str(),
           serviceItem.second);
 }
@@ -382,12 +378,12 @@ int main(int argc, char *argv[]) {
     vtkLogF(INFO, "Average load %f", info.GetLoadAverage());
   }
 
-  // terminate services. (order SHOULD not matter)
-  vtkLog(INFO, "=> Shutdown services");
-  exitServices.store(true);
-  for (auto &service : services) {
-    service->join();
+  vtkLog(INFO, "=> Unsubscribe services");
+  for (auto &subscription : subscriptions) {
+    subscription.unsubscribe();
   }
+  subscriptions.clear();
+  serviceRegistry.clear();
 
   // on server side, wait for client to exit.
   if (!clientSocket->GetConnectingSide()) {
