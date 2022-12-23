@@ -27,6 +27,12 @@
 #include <thread>
 #include <utility>
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#define VTK_WINDOWS_FULL
+#include "vtkWindows.h"
+#define WSA_VERSION MAKEWORD(1, 1)
+#endif
+
 #include <vtkLogger.h>       // for vtkLog()
 #include <vtkServerSocket.h> // for server
 #include <vtkClientSocket.h> // for client
@@ -194,6 +200,14 @@ int main(int argc, char *argv[]) {
   std::string addr;
   int port;
   int numMessages = 20;
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  WSAData wsaData;
+  if (WSAStartup(WSA_VERSION, &wsaData))
+  {
+    vtkLog(ERROR, "Could not initialize sockets !");
+  }
+#endif
 
   for (int i = 1; i < argc; ++i) {
     const char *arg = argv[i];
