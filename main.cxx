@@ -34,6 +34,7 @@
 #define VTK_WINDOWS_FULL
 #include "winsock2.h" // for SD_BOTH. winsock2 must be included before winsock.h
 #include "vtkWindows.h"
+#include "vtksys/Encoding.hxx"
 #define WSA_VERSION MAKEWORD(1, 1)
 // these defines are copied from vtkSocket.cxx
 #define vtkErrnoMacro (WSAGetLastError())
@@ -52,6 +53,35 @@
 #include <vtkSmartPointer.h>            // for memory management of VTK objects
 
 #include "rxcpp/rx-includes.hpp" // for rxcpp
+
+// on windows strerror doesn't handle socket error codes
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// this function is copied from vtkSocket.cxx
+static const char* wsaStrerror(int wsaeid)
+{
+    wchar_t wbuf[256];
+    int ok = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, 0, wsaeid, 0,
+        wbuf, sizeof(wbuf), 0);
+    if (!ok)
+    {
+        return nullptr;
+    }
+
+    std::string result = vtksys::Encoding::ToNarrow(wbuf);
+    size_t count = result.length();
+
+    static char buf[256];
+    if (count >= sizeof(buf))
+    {
+        count = sizeof(buf) - 1;
+    }
+    strncpy_s(buf, result.c_str(), count);
+    buf[count + 1] = '\0';
+
+    return buf;
+}
+VTK_ABI_NAMESPACE_END
+#endif
 
 /**
  * Encapsulate two SimpleSubject(s) used to enqueue incoming/outgoing messages.
