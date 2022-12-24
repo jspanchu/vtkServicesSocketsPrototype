@@ -32,7 +32,8 @@
 // cross-platform includes for socket API
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #define VTK_WINDOWS_FULL
-#include "vtkWindows.h" // has winsock2 headers
+#include "winsock2.h" // for SD_BOTH. winsock2 must be included before winsock.h
+#include "vtkWindows.h"
 #define WSA_VERSION MAKEWORD(1, 1)
 // these defines are copied from vtkSocket.cxx
 #define vtkErrnoMacro (WSAGetLastError())
