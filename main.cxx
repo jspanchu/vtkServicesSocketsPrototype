@@ -162,7 +162,7 @@ void recvLoop(vtkSmartPointer<vtkClientSocket> socket) {
   // server no longer needs to run.
   try {
     exitServer.set_value(true);
-  } catch (std::future_error &e) {
+  } catch (std::future_error&) {
     vtkLog(INFO, "Server interrupted");
   }
 }
@@ -392,7 +392,7 @@ int main(int argc, char *argv[]) {
       vtkLog(INFO, "Caught SIGINT");
       try {
         exitServer.set_value(true);
-      } catch (std::future_error &e) {
+      } catch (std::future_error&) {
         vtkLog(INFO, "Client already disconnected");
       }
     });
