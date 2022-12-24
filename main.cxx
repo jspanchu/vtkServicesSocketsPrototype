@@ -18,11 +18,10 @@
 
 #include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdlib>
 #include <future>
 #include <sstream>
-#include <unordered_map>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -80,7 +79,6 @@ static const char* wsaStrerror(int wsaeid)
 
     return buf;
 }
-VTK_ABI_NAMESPACE_END
 #endif
 
 /**
@@ -419,17 +417,9 @@ int main(int argc, char *argv[]) {
     responseSubscription.unsubscribe();
     vtkLogF(INFO, "Average load %f", info.GetLoadAverage());
   } else {
-    std::signal(SIGINT, [](int) {
-      vtkLog(INFO, "Caught SIGINT");
-      try {
-        exitServer.set_value(true);
-      } catch (std::future_error&) {
-        vtkLog(INFO, "Client already disconnected");
-      }
-    });
     // wait for exitServer to be signalled.
     // it can be signalled from recvLoop when
-    // client disconnects or SIGINT.
+    // client disconnects.
     auto fut = exitServer.get_future();
     fut.wait();
     vtksys::SystemInformation info;
